@@ -207,12 +207,11 @@ plotL3 = plot(showBand3 ? lower3 : na, "Lower 3σ", color=color.red,    linewidt
 // Trend filter
 plot(useTrend ? trendMA : na, "Trend SMA", color=color.purple, linewidth=1)
 
-// Band fills
-if showFill
-    fill(plotU1, plotMean, color=color.new(color.green,  90))
-    fill(plotMean, plotL1, color=color.new(color.green,  90))
-    fill(plotU2, plotU1,   color=color.new(color.orange, 92))
-    fill(plotL1, plotL2,   color=color.new(color.orange, 92))
+// Band fills — fill() must be at top level in Pine v6; gate via color transparency
+fill(plotU1, plotMean, color=showFill ? color.new(color.green,  90) : na)
+fill(plotMean, plotL1, color=showFill ? color.new(color.green,  90) : na)
+fill(plotU2, plotU1,   color=showFill ? color.new(color.orange, 92) : na)
+fill(plotL1, plotL2,   color=showFill ? color.new(color.orange, 92) : na)
 
 //====================================================================
 // 12) SIGNAL MARKERS
