@@ -26,7 +26,7 @@ groupVis    = "Visuals"
 src         = input.source(close,  "Source",              group=groupCore)
 length      = input.int(150,       "Regression Length",   minval=20,  group=groupCore)
 useLog      = input.bool(true,     "Use Log Price",                    group=groupCore)
-smoothZ     = input.int(8,         "Z-Score Smoothing",   minval=1,   group=groupCore,
+smoothZ     = input.int(4,         "Z-Score Smoothing",   minval=1,   group=groupCore,
               tooltip="Higher values reduce false signals in volatile small/mid caps.")
 
 // Bands — slightly wider defaults suit small/mid cap volatility
@@ -38,8 +38,8 @@ showBand2   = input.bool(true,  "Show ±2σ",  group=groupBands)
 showBand3   = input.bool(false, "Show ±3σ",  group=groupBands)
 
 // Signals
-extremeZ    = input.float(2.0, "Extreme Z Threshold",  minval=0.5, step=0.1, group=groupSignal)
-reentryZ    = input.float(1.0, "Re-entry Threshold",   minval=0.1, step=0.1, group=groupSignal)
+extremeZ    = input.float(1.5, "Extreme Z Threshold",  minval=0.5, step=0.1, group=groupSignal)
+reentryZ    = input.float(0.5, "Re-entry Threshold",   minval=0.1, step=0.1, group=groupSignal)
 useTrend    = input.bool(true, "Use Trend Filter",                            group=groupSignal)
 trendLen    = input.int(200,   "Trend SMA Length",     minval=20,             group=groupSignal)
 
@@ -51,13 +51,13 @@ tpMult      = input.float(1.5, "ATR Take-Profit Multiplier", minval=0.5, step=0.
               tooltip="Take profit at this many ATRs from entry, aiming for mean reversion.")
 useTPAtMean = input.bool(true, "Use Regression Mean as Take-Profit Target", group=groupRisk,
               tooltip="When enabled, TP is set at the regression mean rather than a fixed ATR level.")
-maxHoldBars = input.int(30,    "Max Holding Bars",    minval=1, group=groupRisk,
+maxHoldBars = input.int(15,    "Max Holding Bars",    minval=1, group=groupRisk,
               tooltip="Force-exit after this many bars to avoid extended exposure in illiquid names.")
 
 // Volume Filter — important for small/mid cap liquidity
 useVolFilter  = input.bool(true,  "Use Volume Filter",           group=groupVol)
 volSmaLen     = input.int(20,     "Volume SMA Length", minval=5, group=groupVol)
-volMinMult    = input.float(0.75, "Min Volume vs SMA", minval=0.1, step=0.05, group=groupVol,
+volMinMult    = input.float(0.5, "Min Volume vs SMA", minval=0.1, step=0.05, group=groupVol,
                tooltip="Only trade when volume >= this fraction of its SMA (avoids thin trading days).")
 
 // Visuals
@@ -134,9 +134,9 @@ atr = ta.atr(atrLen)
 longExtreme   = z < -extremeZ
 shortExtreme  = z > extremeZ
 
-// Require z to have been extreme within the last `smoothZ` bars for confirmation
-wasLongExtreme  = ta.barssince(longExtreme)  <= smoothZ
-wasShortExtreme = ta.barssince(shortExtreme) <= smoothZ
+// Require z to have been extreme within the last `smoothZ * 3` bars for confirmation
+wasLongExtreme  = ta.barssince(longExtreme)  <= smoothZ * 3
+wasShortExtreme = ta.barssince(shortExtreme) <= smoothZ * 3
 
 longReentry   = ta.crossover (z, -reentryZ) and wasLongExtreme
 shortReentry  = ta.crossunder(z,  reentryZ) and wasShortExtreme
