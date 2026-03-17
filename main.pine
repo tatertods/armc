@@ -1,0 +1,247 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © afafad
+//@version=6
+strategy(
+     title              = "AMRC Strategy – Small/Mid Cap",
+     overlay            = true,
+     default_qty_type   = strategy.percent_of_equity,
+     default_qty_value  = 10,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.1,
+     slippage           = 3,
+     calc_on_every_tick = false
+ )
+
+//====================================================================
+// 1) INPUTS
+//====================================================================
+groupCore   = "Core Settings"
+groupBands  = "Bands"
+groupSignal = "Signals"
+groupRisk   = "Risk Management"
+groupVol    = "Volume Filter"
+groupVis    = "Visuals"
+
+// Core
+src         = input.source(close,  "Source",              group=groupCore)
+length      = input.int(150,       "Regression Length",   minval=20,  group=groupCore)
+useLog      = input.bool(true,     "Use Log Price",                    group=groupCore)
+smoothZ     = input.int(8,         "Z-Score Smoothing",   minval=1,   group=groupCore,
+              tooltip="Higher values reduce false signals in volatile small/mid caps.")
+
+// Bands — slightly wider defaults suit small/mid cap volatility
+band1Mult   = input.float(1.5,  "Band 1 Multiplier", minval=0.1, step=0.1, group=groupBands)
+band2Mult   = input.float(2.5,  "Band 2 Multiplier", minval=0.1, step=0.1, group=groupBands)
+band3Mult   = input.float(3.5,  "Band 3 Multiplier", minval=0.1, step=0.1, group=groupBands)
+showBand1   = input.bool(true,  "Show ±1σ",  group=groupBands)
+showBand2   = input.bool(true,  "Show ±2σ",  group=groupBands)
+showBand3   = input.bool(false, "Show ±3σ",  group=groupBands)
+
+// Signals
+extremeZ    = input.float(2.0, "Extreme Z Threshold",  minval=0.5, step=0.1, group=groupSignal)
+reentryZ    = input.float(1.0, "Re-entry Threshold",   minval=0.1, step=0.1, group=groupSignal)
+useTrend    = input.bool(true, "Use Trend Filter",                            group=groupSignal)
+trendLen    = input.int(200,   "Trend SMA Length",     minval=20,             group=groupSignal)
+
+// Risk Management
+atrLen      = input.int(14,    "ATR Length",          minval=1,   group=groupRisk)
+atrMult     = input.float(2.5, "ATR Stop Multiplier", minval=0.5, step=0.1, group=groupRisk,
+              tooltip="Stop loss placed this many ATRs from entry. Wider for small/mid cap spreads.")
+tpMult      = input.float(1.5, "ATR Take-Profit Multiplier", minval=0.5, step=0.1, group=groupRisk,
+              tooltip="Take profit at this many ATRs from entry, aiming for mean reversion.")
+useTPAtMean = input.bool(true, "Use Regression Mean as Take-Profit Target", group=groupRisk,
+              tooltip="When enabled, TP is set at the regression mean rather than a fixed ATR level.")
+maxHoldBars = input.int(30,    "Max Holding Bars",    minval=1, group=groupRisk,
+              tooltip="Force-exit after this many bars to avoid extended exposure in illiquid names.")
+
+// Volume Filter — important for small/mid cap liquidity
+useVolFilter  = input.bool(true,  "Use Volume Filter",           group=groupVol)
+volSmaLen     = input.int(20,     "Volume SMA Length", minval=5, group=groupVol)
+volMinMult    = input.float(0.75, "Min Volume vs SMA", minval=0.1, step=0.05, group=groupVol,
+               tooltip="Only trade when volume >= this fraction of its SMA (avoids thin trading days).")
+
+// Visuals
+showSignals = input.bool(true,  "Show Signal Markers",     group=groupVis)
+showFill    = input.bool(true,  "Fill Bands",              group=groupVis)
+showLabel   = input.bool(true,  "Show Last-Bar Z Label",   group=groupVis)
+
+//====================================================================
+// 2) PRICE TRANSFORMATION
+//====================================================================
+seriesInput = useLog ? math.log(src) : src
+
+//====================================================================
+// 3) REGRESSION MEAN
+//====================================================================
+meanSeries = ta.linreg(seriesInput, length, 0)
+
+//====================================================================
+// 4) RESIDUALS AND VOLATILITY
+//====================================================================
+residual = seriesInput - meanSeries
+sigma    = ta.stdev(residual, length)
+rawZ     = sigma != 0 ? residual / sigma : na
+z        = ta.sma(rawZ, smoothZ)
+
+//====================================================================
+// 5) CHANNEL CONSTRUCTION
+//====================================================================
+upper1_t = meanSeries + band1Mult * sigma
+lower1_t = meanSeries - band1Mult * sigma
+upper2_t = meanSeries + band2Mult * sigma
+lower2_t = meanSeries - band2Mult * sigma
+upper3_t = meanSeries + band3Mult * sigma
+lower3_t = meanSeries - band3Mult * sigma
+
+toPrice(x) => useLog ? math.exp(x) : x
+
+meanLine = toPrice(meanSeries)
+upper1   = toPrice(upper1_t)
+lower1   = toPrice(lower1_t)
+upper2   = toPrice(upper2_t)
+lower2   = toPrice(lower2_t)
+upper3   = toPrice(upper3_t)
+lower3   = toPrice(lower3_t)
+
+//====================================================================
+// 6) TREND FILTER
+//====================================================================
+trendMA   = ta.sma(close, trendLen)
+upTrend   = close > trendMA
+downTrend = close < trendMA
+
+allowLong  = useTrend ? upTrend  : true
+allowShort = useTrend ? downTrend : true
+
+//====================================================================
+// 7) VOLUME FILTER
+//====================================================================
+volSma      = ta.sma(volume, volSmaLen)
+volOK       = useVolFilter ? (volume >= volSma * volMinMult) : true
+
+//====================================================================
+// 8) ATR FOR RISK MANAGEMENT
+//====================================================================
+atr = ta.atr(atrLen)
+
+//====================================================================
+// 9) SIGNAL LOGIC
+//====================================================================
+// --- Two-stage confirmation (reduces Sharpe-killing whipsaws) ---
+// Stage 1: price must have been "extreme" (|z| > extremeZ) at some recent point
+// Stage 2: z is now crossing back inside the re-entry threshold
+
+longExtreme   = z < -extremeZ
+shortExtreme  = z > extremeZ
+
+// Require z to have been extreme within the last `smoothZ` bars for confirmation
+wasLongExtreme  = ta.barssince(longExtreme)  <= smoothZ
+wasShortExtreme = ta.barssince(shortExtreme) <= smoothZ
+
+longReentry   = ta.crossover (z, -reentryZ) and wasLongExtreme
+shortReentry  = ta.crossunder(z,  reentryZ) and wasShortExtreme
+
+longSignal    = longExtreme  and allowLong  and volOK
+shortSignal   = shortExtreme and allowShort and volOK
+
+longConfirm   = longReentry  and allowLong  and volOK
+shortConfirm  = shortReentry and allowShort and volOK
+
+//====================================================================
+// 10) STRATEGY ENTRIES & EXITS
+//====================================================================
+var int   entryBar  = na
+var float entryATR  = na
+
+// ---- Entries ----
+if longConfirm and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    entryBar := bar_index
+    entryATR := atr
+
+if shortConfirm and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    entryBar := bar_index
+    entryATR := atr
+
+// ---- ATR-based Stop Loss & Take Profit ----
+// Recalculate each bar so exits are placed correctly on new entries
+if strategy.position_size > 0
+    stopPrice = strategy.position_avg_price - atrMult * entryATR
+    tpPrice   = useTPAtMean ? meanLine : strategy.position_avg_price + tpMult * entryATR
+    strategy.exit("Long Exit", "Long", stop=stopPrice, limit=tpPrice)
+
+if strategy.position_size < 0
+    stopPrice = strategy.position_avg_price + atrMult * entryATR
+    tpPrice   = useTPAtMean ? meanLine : strategy.position_avg_price - tpMult * entryATR
+    strategy.exit("Short Exit", "Short", stop=stopPrice, limit=tpPrice)
+
+// ---- Max holding period (avoids being trapped in illiquid positions) ----
+if not na(entryBar) and (bar_index - entryBar) >= maxHoldBars and strategy.position_size != 0
+    strategy.close_all(comment="Max Hold")
+
+// ---- Mean-cross exit (secondary safety valve when not using TP at mean) ----
+if not useTPAtMean
+    if strategy.position_size > 0 and z > 0
+        strategy.close("Long", comment="Mean Cross")
+    if strategy.position_size < 0 and z < 0
+        strategy.close("Short", comment="Mean Cross")
+
+//====================================================================
+// 11) PLOTTING
+//====================================================================
+plotMean  = plot(meanLine, "Regression Mean", color=color.yellow, linewidth=3)
+
+// 1σ bands
+plotU1 = plot(showBand1 ? upper1 : na, "Upper 1σ", color=color.green,  linewidth=1)
+plotL1 = plot(showBand1 ? lower1 : na, "Lower 1σ", color=color.green,  linewidth=1)
+
+// 2σ bands
+plotU2 = plot(showBand2 ? upper2 : na, "Upper 2σ", color=color.orange, linewidth=2)
+plotL2 = plot(showBand2 ? lower2 : na, "Lower 2σ", color=color.orange, linewidth=2)
+
+// 3σ bands
+plotU3 = plot(showBand3 ? upper3 : na, "Upper 3σ", color=color.red,    linewidth=2)
+plotL3 = plot(showBand3 ? lower3 : na, "Lower 3σ", color=color.red,    linewidth=2)
+
+// Trend filter
+plot(useTrend ? trendMA : na, "Trend SMA", color=color.purple, linewidth=1)
+
+// Band fills
+if showFill
+    fill(plotU1, plotMean, color=color.new(color.green,  90))
+    fill(plotMean, plotL1, color=color.new(color.green,  90))
+    fill(plotU2, plotU1,   color=color.new(color.orange, 92))
+    fill(plotL1, plotL2,   color=color.new(color.orange, 92))
+
+//====================================================================
+// 12) SIGNAL MARKERS
+//====================================================================
+plotshape(showSignals and longSignal,  title="Long Extreme",  style=shape.triangleup,   location=location.belowbar, size=size.small, text="RTM L", color=color.new(color.lime, 20))
+plotshape(showSignals and shortSignal, title="Short Extreme", style=shape.triangledown, location=location.abovebar, size=size.small, text="RTM S", color=color.new(color.red,  20))
+plotshape(showSignals and longConfirm, title="Long Re-entry", style=shape.circle,       location=location.belowbar, size=size.tiny,  text="↩L",    color=color.new(color.lime, 0))
+plotshape(showSignals and shortConfirm,title="Short Re-entry",style=shape.circle,       location=location.abovebar, size=size.tiny,  text="↩S",    color=color.new(color.red,  0))
+
+//====================================================================
+// 13) ALERTS
+//====================================================================
+alertcondition(longSignal,   title="AMRC Long Extreme",  message="AMRC: Price statistically stretched below regression mean.")
+alertcondition(shortSignal,  title="AMRC Short Extreme", message="AMRC: Price statistically stretched above regression mean.")
+alertcondition(longConfirm,  title="AMRC Long Re-entry", message="AMRC: Z-score re-entering upward from oversold zone.")
+alertcondition(shortConfirm, title="AMRC Short Re-entry",message="AMRC: Z-score re-entering downward from overbought zone.")
+
+//====================================================================
+// 14) LAST-BAR INFO LABEL
+//====================================================================
+var label zLabel = na
+if showLabel and barstate.islast
+    label.delete(zLabel)
+    rrRatio = atrMult > 0 ? str.tostring(tpMult / atrMult, "#.##") : "n/a"
+    txt = "AMRC – Small/Mid Cap\n" +
+          "Z: "          + str.tostring(z,     "#.##")   + "\n" +
+          "Residual σ: " + str.tostring(sigma, "#.####") + "\n" +
+          "ATR: "        + str.tostring(atr,   "#.####") + "\n" +
+          "R:R target: " + rrRatio                       + "\n" +
+          "Trend: "      + (upTrend ? "Up" : downTrend ? "Down" : "Flat")
+    zLabel := label.new(bar_index, high, txt, style=label.style_label_down,
+                        textcolor=color.white, color=color.new(color.navy, 20))
